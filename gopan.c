@@ -101,7 +101,7 @@ FcPattern *choose_font_for(uint32_t rune, FcFontSet *fs, uint32_t *priority)
 	return NULL;
 }
 
-FcFontSet *load_fonts(FcConfig *config, char *pattern)
+FcFontSet *load_fonts(FcConfig *config, char *pattern, bool with_color)
 {
 
 	FcResult result; // maybe someone uses this sometimes or something.
@@ -109,6 +109,9 @@ FcFontSet *load_fonts(FcConfig *config, char *pattern)
 	if (!pat) {
 		printf("Woops failed to parse pattern: %s\n", pattern);
 		return NULL;
+	}
+	if (with_color) { // for emoji selectors we want another fs with colors to prioritize by.
+		FcPatternAddBool(pat, "color", with_color);
 	}
 	FcConfigSubstitute(config, pat, FcMatchPattern);
 	FcDefaultSubstitute(pat);
@@ -152,25 +155,22 @@ bool is_space(uint32_t rune)
 	// pango uses unicode type
 	// control/format/surrogate/linesep/parasep/spacesep
 	// along with 0x1680u (whitespace in ucd 11)
-	// and ranges 0xfe00u-0xfe0fu 0xe0100u-0xe01efu
-	if ((0x0009 <= rune && rune <= 0x000D) || 0x0020 == rune ||
-	    0x0085 == rune || 0x00A0 == rune || 0x1680 == rune ||
-	    (0x2000 <= rune && rune <= 0x200D) || 0x2028 == rune ||
-	    0x2029 == rune || 0x202F == rune || 0x205F == rune || 0x3000 == rune ||
-	    (0xfe00 < rune && rune < 0xfe0f) ||
-	    (0xe0100 < rune && rune < 0xe01ef)) {
-		return true;
-	}
-	// dont judge me.
-	return false;
+	return (0x0009 <= rune && rune <= 0x000D) || 0x0020 == rune ||
+	       0x0085 == rune || 0x00A0 == rune || 0x1680 == rune ||
+	       (0x2000 <= rune && rune <= 0x200D) || 0x2028 == rune ||
+	       0x2029 == rune || 0x202F == rune || 0x205F == rune || 0x3000 == rune;
 }
 
-void gp_itemize(gp_runes runes, FcFontSet *fs, FriBidiLevel *levels,
-                gp_run **runs_out, uint32_t *len)
+bool is_variant_sel(uint32_t rune)
 {
-	//TODO: handle
-	// 4 emoji runs
-	// 5 fixup paired chars (paren/quotes/etc)? Prefering higher priority fonts mostly fixed this.
+	return (0xfe00 <= rune && rune <= 0xfe0f) ||
+	       (0xe0100 <= rune && rune <= 0xe01ef);
+}
+
+void gp_itemize(gp_runes runes, FcFontSet *fs, FcFontSet *fs_color,
+                FriBidiLevel *levels, gp_run **runs_out, uint32_t *len)
+{
+	// TODO: maintain paired chars (paren/quotes/etc)? Prefering higher priority fonts mostly fixed this.
 
 	gp_run *runs = malloc(sizeof(gp_run) * 256);
 	gp_run_iter iter = {0};
@@ -187,17 +187,23 @@ void gp_itemize(gp_runes runes, FcFontSet *fs, FriBidiLevel *levels,
 		bool changed = false;
 		uint32_t rune = runes.data[iter.at];
 		// Just dont break runs on whitespace.
-		if (is_space(rune)) {
+		// TODO: handle (emoji) variant selectors
+		if (is_space(rune) || is_variant_sel(rune)) {
 			continue;
 		}
+
 		if (iter.font == NULL) {
 			// we delayed choosing font until non-space so dont mark changed.
 			iter.font = choose_font_for(rune, fs, &iter.font_pri);
 		}
 
 		enum gp_width width = gp_rune_width(rune);
-		changed |= (iter.width == GP_WIDTH_AMBIGUOUS &&
-		            width != GP_WIDTH_AMBIGUOUS);
+		changed |=
+		        (iter.width == GP_WIDTH_AMBIGUOUS &&
+		         !(width == GP_WIDTH_AMBIGUOUS || width == GP_WIDTH_NEUTRAL));
+		if (changed) {
+			printf("width changed %d vs %d\n", iter.width, width);
+		}
 
 		FcPattern *font = NULL;
 		uint32_t font_pri = 0xFFFFFFFF;
@@ -208,14 +214,21 @@ void gp_itemize(gp_runes runes, FcFontSet *fs, FriBidiLevel *levels,
 			                          !pattern_has_rune(iter.font, rune))) {
 				changed |= true;
 				font = font_test;
+				printf("font changed\n");
 			}
 		}
 
 		enum gp_script script = gp_rune_script(rune);
 		changed |= iter.script != script;
+		if (iter.script != script) {
+			printf("script changed\n");
+		}
 
 		int16_t level = levels[iter.at];
 		changed |= iter.level != level;
+		if (iter.level != level) {
+			printf("level changed\n");
+		}
 
 		if (changed) {
 			runs[r].start = iter.start;
@@ -293,19 +306,18 @@ void shape_runs(gp_runes vrunes, gp_run *runs, uint32_t len)
 		uint32_t run_len = runs[i].end - runs[i].start;
 		hb_buffer_add_codepoints(buf, &vrunes.data[runs[i].start], run_len, 0,
 		                         run_len);
-		/*
-				hb_segment_properties_t props = {
-						.direction = HB_DIRECTION_LTR,
-						.script = HB_SCRIPT_COMMON,
-						.language = hb_language_get_default(),
-				};
-				*/
-		//TODO: carry these from itemization
-		hb_buffer_guess_segment_properties(buf);
-		hb_direction_t dir = hb_buffer_get_direction(buf);
-		if (dir == HB_DIRECTION_RTL) {
+		hb_segment_properties_t props = {
+		        .direction = runs[i].level % 2 ? HB_DIRECTION_RTL
+		                                       : HB_DIRECTION_LTR,
+		        .script = hb_script_from_iso15924_tag((hb_tag_t)runs[i].script),
+		        //TODO: Can we do better than guessing from locale?
+		        .language = hb_language_get_default(),
+		};
+		//TODO: Use visual order instead?
+		if (props.direction == HB_DIRECTION_RTL) {
 			hb_buffer_reverse(buf);
 		}
+		hb_buffer_set_segment_properties(buf, &props);
 
 		// Features?
 		hb_shape(font, buf, NULL, 0);
@@ -397,7 +409,8 @@ int main(int argc, char *argv[])
 	// Why cant we just have a real context...
 	FcConfigSetCurrent(config);
 	FcConfigBuildFonts(config);
-	FcFontSet *fs = load_fonts(config, argv[1]);
+	FcFontSet *fs = load_fonts(config, argv[1], false);
+	FcFontSet *fs_color = load_fonts(config, argv[1], true);
 
 	int32_t slen = strlen(argv[2]);
 	FriBidiLevel embedding[256];
@@ -414,7 +427,7 @@ int main(int argc, char *argv[])
 
 	uint32_t r_len;
 	gp_run *runs;
-	gp_itemize(vrunes, fs, embedding, &runs, &r_len);
+	gp_itemize(vrunes, fs_color, fs_color, embedding, &runs, &r_len);
 
 	printf("runs: %d\n", r_len);
 	uint32_t i = 0;
