@@ -1,3 +1,5 @@
+#ifndef GP_HEADER_GP_PROPS_H
+#define GP_HEADER_GP_PROPS_H
 
 enum gp_script {
 	GP_SCRIPT_ADLAM = 0x41646c6d,
@@ -165,24 +167,7 @@ enum gp_width {
 	GP_WIDTH_WIDE,
 };
 
-#include "gp_props_tables.h"
+enum gp_width gp_rune_width(uint32_t rune);
+enum gp_script gp_rune_script(uint32_t rune);
 
-enum gp_width gp_rune_width(uint32_t rune)
-{
-	for (uint32_t i = 0; i < sizeof(ea_table) / sizeof(*ea_table); i++) {
-		if (rune >= ea_table[i].l && rune < ea_table[i].h) {
-			return ea_table[i].ea;
-		}
-	}
-	return GP_WIDTH_AMBIGUOUS;
-}
-
-enum gp_script gp_rune_script(uint32_t rune)
-{
-	for (uint32_t i = 0; i < sizeof(sc_table) / sizeof(*sc_table); i++) {
-		if (rune >= sc_table[i].l && rune < sc_table[i].h) {
-			return sc_table[i].sc;
-		}
-	}
-	return GP_SCRIPT_UNKNOWN;
-}
+#endif

@@ -5,30 +5,16 @@
 #include <fontconfig/fontconfig.h>
 
 #include <stddef.h>
-#include <stdio.h>
 #include <stdbool.h>
-#include <string.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <assert.h>
 
+#include "gp.h"
 #include "gp_props.h"
 
 #define UNUSED(x) (void)(x)
-
-typedef struct gp_runes {
-	uint32_t *data;
-	uint32_t len;
-} gp_runes;
-
-typedef struct gp_run {
-	uint32_t start;
-	uint32_t end;
-
-	int16_t level; // embedding level. Even values are LTR, odd values are RTL.
-	enum gp_script script;
-	enum gp_width width;
-	FcPattern *font;
-	hb_buffer_t *glyphs;
-} gp_run;
 
 typedef struct gp_run_iter {
 	uint32_t start;
@@ -39,39 +25,7 @@ typedef struct gp_run_iter {
 	enum gp_width width;
 	FcPattern *font;
 	uint32_t font_pri; // priority of current font
-
 } gp_run_iter;
-
-char *print_font(FcPattern *font)
-{
-	FcObjectSet *prop_filter = FcObjectSetCreate();
-	// FcObjectSetAdd(prop_filter, "lang");
-	FcObjectSetAdd(prop_filter, "family");
-	FcObjectSetAdd(prop_filter, "size");
-	FcPattern *font_small = FcPatternFilter(font, prop_filter);
-
-	FcChar8 *s = FcNameUnparse(font_small);
-	FcPatternDestroy(font_small);
-	FcObjectSetDestroy(prop_filter);
-	return (char *)s;
-}
-
-void print_fonts(FcFontSet *fs)
-{
-	// https://www.freedesktop.org/software/fontconfig/fontconfig-devel/x19.html
-	FcObjectSet *prop_filter = FcObjectSetCreate();
-	FcObjectSetAdd(prop_filter, "lang");
-	FcObjectSetAdd(prop_filter, "family");
-	FcObjectSetAdd(prop_filter, "size");
-	for (int j = 0; fs && j < fs->nfont; j++) {
-		FcPattern *font = FcPatternFilter(fs->fonts[j], prop_filter);
-		FcChar8 *s = FcNameUnparse(font);
-		printf("%s\n", s);
-		FcStrFree(s);
-		FcPatternDestroy(font);
-	}
-	FcObjectSetDestroy(prop_filter);
-}
 
 bool pattern_has_rune(FcPattern *font, uint32_t rune)
 {
@@ -89,56 +43,11 @@ FcPattern *choose_font_for(uint32_t rune, FcFontSet *fs, uint32_t *priority)
 				*priority = (uint32_t)j;
 			return fs->fonts[j];
 		}
-		/*
-				char *font_name = print_font(fs->fonts[j]);
-				printf("%s missing %04x\n", font_name, rune);
-				FcStrFree((FcChar8 *)font_name);
-				*/
 	}
 	printf("Failed to find matching font in %d\n", fs->nfont);
 	if (priority) // hope you dont have more than 4b fonts.
 		*priority = 0xFFFFFFFF;
 	return NULL;
-}
-
-FcFontSet *load_fonts(FcConfig *config, char *pattern, bool with_color)
-{
-
-	FcResult result; // maybe someone uses this sometimes or something.
-	FcPattern *pat = FcNameParse((FcChar8 *)pattern);
-	if (!pat) {
-		printf("Woops failed to parse pattern: %s\n", pattern);
-		return NULL;
-	}
-	if (with_color) { // for emoji selectors we want another fs with colors to prioritize by.
-		FcPatternAddBool(pat, "color", with_color);
-	}
-	FcConfigSubstitute(config, pat, FcMatchPattern);
-	FcDefaultSubstitute(pat);
-
-	// https://www.freedesktop.org/software/fontconfig/fontconfig-devel/fcfontsort.html
-	// Do the pattern search based on search. Optionally return coverage.
-	// returns underspecified fonts which must be completed via
-	// FcFontRendererPrepare. Some people only use fontcofig for search
-	// and impl custom searching like browsers.
-	FcFontSet *search_pats = FcFontSort(config, pat, FcTrue /* trim */,
-	                                    0 /* coverage out */, &result);
-	if (!search_pats || search_pats->nfont == 0) {
-		printf("Woops no fonts installed?\n");
-		return NULL;
-	}
-
-	printf("Found %d fonts\n", search_pats->nfont);
-	FcFontSet *fs = FcFontSetCreate();
-	for (int j = 0; j < search_pats->nfont; j++) {
-		FcPattern *font_pattern =
-		        FcFontRenderPrepare(config, pat, search_pats->fonts[j]);
-		if (font_pattern)
-			FcFontSetAdd(fs, font_pattern);
-	}
-	FcFontSetSortDestroy(search_pats);
-
-	return fs;
 }
 
 bool width_eql(enum gp_width l, enum gp_width r)
@@ -167,27 +76,30 @@ bool is_variant_sel(uint32_t rune)
 	       (0xe0100 <= rune && rune <= 0xe01ef);
 }
 
-void gp_itemize(gp_runes runes, FcFontSet *fs, FcFontSet *fs_color,
-                FriBidiLevel *levels, gp_run **runs_out, uint32_t *len)
+void gp_itemize(gp_runes_t runes, FcFontSet *fs, FcFontSet *fs_color,
+                FriBidiLevel *levels, gp_run_t **runs_out, uint32_t *len)
 {
 	// TODO: maintain paired chars (paren/quotes/etc)? Prefering higher priority fonts mostly fixed this.
+	UNUSED(fs_color);
 
-	gp_run *runs = malloc(sizeof(gp_run) * 256);
 	gp_run_iter iter = {0};
-	iter.width = gp_rune_width(runes.data[0]);
-	iter.script = gp_rune_script(runes.data[0]);
-	iter.level = levels[0];
-	if (!is_space(runes.data[0])) {
-		iter.font = choose_font_for(runes.data[0], fs, &iter.font_pri);
-	}
-	iter.at = 1;
-
+	gp_run_t *runs = malloc(sizeof(gp_run_t) * 256);
 	size_t r = 0;
+
+	// spaces are ambiguous skip any leading spaces.
+	while (is_space(runes.data[iter.at]) && iter.at < runes.len) {
+		iter.at++;
+	}
+	iter.width = gp_rune_width(runes.data[iter.at]);
+	iter.script = gp_rune_script(runes.data[iter.at]);
+	iter.level = levels[iter.at];
+	iter.font = choose_font_for(runes.data[iter.at], fs, &iter.font_pri);
+
 	for (; iter.at < runes.len; iter.at++) {
 		bool changed = false;
 		uint32_t rune = runes.data[iter.at];
 		// Just dont break runs on whitespace.
-		// TODO: handle (emoji) variant selectors
+		// TODO: handle (emoji) variant selectors (requires another parser)
 		if (is_space(rune) || is_variant_sel(rune)) {
 			continue;
 		}
@@ -201,9 +113,6 @@ void gp_itemize(gp_runes runes, FcFontSet *fs, FcFontSet *fs_color,
 		changed |=
 		        (iter.width == GP_WIDTH_AMBIGUOUS &&
 		         !(width == GP_WIDTH_AMBIGUOUS || width == GP_WIDTH_NEUTRAL));
-		if (changed) {
-			printf("width changed %d vs %d\n", iter.width, width);
-		}
 
 		FcPattern *font = NULL;
 		uint32_t font_pri = 0xFFFFFFFF;
@@ -214,23 +123,17 @@ void gp_itemize(gp_runes runes, FcFontSet *fs, FcFontSet *fs_color,
 			                          !pattern_has_rune(iter.font, rune))) {
 				changed |= true;
 				font = font_test;
-				printf("font changed\n");
 			}
 		}
 
 		enum gp_script script = gp_rune_script(rune);
 		changed |= iter.script != script;
-		if (iter.script != script) {
-			printf("script changed\n");
-		}
 
 		int16_t level = levels[iter.at];
 		changed |= iter.level != level;
-		if (iter.level != level) {
-			printf("level changed\n");
-		}
 
-		if (changed) {
+		// Terminate current run on attribute changes or end of text.
+		if (changed || iter.at == runes.len - 1) {
 			runs[r].start = iter.start;
 			runs[r].end = iter.at;
 			runs[r].script = iter.script;
@@ -251,24 +154,15 @@ void gp_itemize(gp_runes runes, FcFontSet *fs, FcFontSet *fs_color,
 				iter.font = choose_font_for(rune, fs, &iter.font_pri);
 			}
 			r++;
+			assert(r < 256);
 		}
 	}
-	runs[r].start = iter.start;
-	runs[r].end = iter.at;
-	runs[r].script = iter.script;
-	runs[r].width = iter.width;
-	runs[r].level = iter.level;
-	if (iter.font == NULL) {
-		printf("run had no font???\n");
-	}
-	runs[r].font = iter.font;
-	r++;
 
 	*runs_out = runs;
 	*len = r;
 }
 
-void shape_runs(gp_runes vrunes, gp_run *runs, uint32_t len)
+void shape_runs(gp_runes_t vrunes, gp_run_t *runs, uint32_t len)
 {
 	uint32_t i = 0;
 	while (i < len) {
@@ -279,6 +173,7 @@ void shape_runs(gp_runes vrunes, gp_run *runs, uint32_t len)
 		hb_blob_t *fileblob = hb_blob_create_from_file(file);
 		hb_face_t *face = hb_face_create(fileblob, 0);
 		hb_font_t *font = hb_font_create(face);
+
 		// Set font size during shaping, for appropriate glyph advances.
 		// add subpixel scaling factor on top since hb is integer based.
 		double size;
@@ -298,7 +193,8 @@ void shape_runs(gp_runes vrunes, gp_run *runs, uint32_t len)
 			size_y *= scale_mat->yy;
 		}
 
-		hb_font_set_scale(font, size_x * 2048, size_y * 2048);
+		hb_font_set_scale(font, size_x * GP_SHAPE_SCALE,
+		                  size_y * GP_SHAPE_SCALE);
 
 		hb_buffer_t *buf = hb_buffer_create();
 		//TODO: Add context from prior and next run for better shaping.
@@ -330,14 +226,81 @@ void shape_runs(gp_runes vrunes, gp_run *runs, uint32_t len)
 	}
 }
 
-void draw_cairo(gp_run *runs, uint32_t len)
+bool gp_analyze(gp_runes_t runes, FcFontSet *fs, FcFontSet *fs_color,
+                char *lang, gp_run_t **runs_out, uint32_t *len)
 {
-	UNUSED(runs);
-	UNUSED(len);
-	cairo_surface_t *bitmap =
-	        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 600, 64);
-	cairo_t *cr = cairo_create(bitmap);
+	UNUSED(lang);
+	assert(runes.len < 4096); // I dont want to malloc.
+	uint32_t vstr[4096];
+	FriBidiLevel embedding[4096];
+	FriBidiParType base = FRIBIDI_PAR_LTR;
+	if (!fribidi_log2vis(runes.data, runes.len, &base, vstr, NULL, NULL,
+	                     embedding)) {
+		return false;
+	}
+	gp_runes_t vrunes = {vstr, runes.len};
 
+	gp_run_t *runs;
+	uint32_t runs_len;
+	//TODO: cache font tables.
+	gp_itemize(vrunes, fs, fs_color, embedding, &runs, &runs_len);
+
+	shape_runs(vrunes, runs, runs_len);
+
+	*runs_out = runs;
+	*len = runs_len;
+	return true;
+}
+
+FcFontSet *gp_load_font(FcConfig *config, char *pattern, bool with_color)
+{
+
+	FcResult result; // maybe someone uses this sometimes or something.
+	FcPattern *pat = FcNameParse((FcChar8 *)pattern);
+	if (!pat) {
+		printf("Woops failed to parse pattern: %s\n", pattern);
+		return NULL;
+	}
+	if (with_color) { // for emoji selectors we want another fs with colors to prioritize by.
+		FcPatternAddBool(pat, "color", with_color);
+	}
+	FcConfigSubstitute(config, pat, FcMatchPattern);
+	FcDefaultSubstitute(pat);
+
+	// https://www.freedesktop.org/software/fontconfig/fontconfig-devel/fcfontsort.html
+	// Do the pattern search based on search. Optionally return coverage.
+	// returns underspecified fonts which must be completed via
+	// FcFontRendererPrepare. Some people only use fontcofig for search
+	// and impl custom searching like browsers.
+	FcFontSet *search_pats = FcFontSort(config, pat, FcTrue /* trim */,
+	                                    0 /* coverage out */, &result);
+	if (!search_pats || search_pats->nfont == 0) {
+		printf("Woops no fonts installed?\n");
+		return NULL;
+	}
+
+	FcFontSet *fs = FcFontSetCreate();
+	for (int j = 0; j < search_pats->nfont; j++) {
+		FcPattern *font_pattern =
+		        FcFontRenderPrepare(config, pat, search_pats->fonts[j]);
+		if (font_pattern)
+			FcFontSetAdd(fs, font_pattern);
+	}
+	FcFontSetSortDestroy(search_pats);
+
+	return fs;
+}
+
+void gp_utf8_to_runes(char *utf8, uint32_t len, uint32_t dst_cap, uint32_t *dst,
+                      uint32_t *dst_len)
+{
+	UNUSED(dst_cap);
+	int char_set_num = fribidi_parse_charset("UTF-8");
+	*dst_len = fribidi_charset_to_unicode(char_set_num, utf8, len, dst);
+}
+
+void gp_draw_cairo(cairo_t *cr, gp_run_t *runs, uint32_t len)
+{
 	uint32_t i = 0;
 	double x = 0.0, y = 48.0;
 	while (i < len) {
@@ -377,79 +340,13 @@ void draw_cairo(gp_run *runs, uint32_t len)
 		uint32_t g = 0;
 		while (g < glen) {
 			draw_glyph[g].index = glyph_info[g].codepoint;
-			draw_glyph[g].x = x + glyph_pos[g].x_offset / 2048.0;
-			draw_glyph[g].y = y + glyph_pos[g].y_offset / 2048.0;
-			x += glyph_pos[g].x_advance / 2048.0;
-			y += glyph_pos[g].y_advance / 2048.0;
+			draw_glyph[g].x = x + glyph_pos[g].x_offset / (float)GP_SHAPE_SCALE;
+			draw_glyph[g].y = y + glyph_pos[g].y_offset / (float)GP_SHAPE_SCALE;
+			x += glyph_pos[g].x_advance / (float)GP_SHAPE_SCALE;
+			y += glyph_pos[g].y_advance / (float)GP_SHAPE_SCALE;
 			g++;
 		}
 		cairo_show_glyphs(cr, draw_glyph, glen);
-		// cairo_fill(cr);
 		i++;
 	}
-
-	if (cairo_surface_write_to_png(bitmap, "out.png") != CAIRO_STATUS_SUCCESS) {
-		printf("Woops failed to write out png");
-	}
-	cairo_destroy(cr);
-	cairo_surface_destroy(bitmap);
-}
-
-int main(int argc, char *argv[])
-{
-	if (argc != 3) {
-		printf("Invalid arguments.\nCall with Fontconfig pattern and text to render.\nE.g. gopan \"sans-22:weight=10\" \"hello こんにちは 你好 مرحبا שלום ဟယ်လို 👨‍🦳👶👅👀🇹🇼🅱\"\n");
-		exit(1);
-	}
-	FcConfig *config = FcConfigCreate();
-	if (FcConfigParseAndLoad(config, NULL, FcTrue) != FcTrue) {
-		printf("Failed to load fontconfig\n");
-		return -1;
-	}
-	// Why cant we just have a real context...
-	FcConfigSetCurrent(config);
-	FcConfigBuildFonts(config);
-	FcFontSet *fs = load_fonts(config, argv[1], false);
-	FcFontSet *fs_color = load_fonts(config, argv[1], true);
-
-	int32_t slen = strlen(argv[2]);
-	FriBidiLevel embedding[256];
-	FriBidiChar vstr[256], lstr[256];
-	FriBidiParType base = FRIBIDI_PAR_LTR;
-	int char_set_num = fribidi_parse_charset("UTF-8");
-
-	uint32_t len =
-	        fribidi_charset_to_unicode(char_set_num, argv[2], slen, lstr);
-	if (!fribidi_log2vis(lstr, len, &base, vstr, NULL, NULL, embedding)) {
-		return 1;
-	}
-	gp_runes vrunes = {vstr, len};
-
-	uint32_t r_len;
-	gp_run *runs;
-	gp_itemize(vrunes, fs_color, fs_color, embedding, &runs, &r_len);
-
-	printf("runs: %d\n", r_len);
-	uint32_t i = 0;
-	while (i < r_len) {
-		if (runs[i].font) {
-			char *font_str = print_font(runs[i].font);
-			printf("s(0x%04x): %d, e:%d (%s)\n", vrunes.data[runs[i].start],
-			       runs[i].start, runs[i].end, font_str);
-			FcStrFree((FcChar8 *)font_str);
-		} else {
-			printf("s: %d, e:%d (no font?)\n", runs[i].start, runs[i].end);
-		}
-		i++;
-	}
-	printf("\n");
-
-	shape_runs(vrunes, runs, r_len);
-	printf("shaped runs I guess\n");
-
-	draw_cairo(runs, r_len);
-	printf("drew runs to out.png\n");
-
-	FcFontSetDestroy(fs);
-	return 0;
 }

@@ -22,4 +22,4 @@ shaper. Finally we use the shaped glyphs and fonts and render (cairo can
 rasterize the paths all on its own so it's extra easy to use).
 
 The the code in this repository is provided under the GPLv3 or MIT, whichever
-you prefer.
+you prefer. Though its dependencies may be GPL.
