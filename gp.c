@@ -76,6 +76,14 @@ bool is_variant_sel(uint32_t rune)
 	       (0xe0100 <= rune && rune <= 0xe01ef);
 }
 
+void gp_run_destroy(gp_run_t *runs, uint32_t len)
+{
+	for (uint i = 0; i < len; i++) {
+		hb_buffer_destroy(runs[i].glyphs);
+	}
+	free(runs);
+}
+
 void gp_itemize(gp_runes_t runes, FcFontSet *fs, FcFontSet *fs_color,
                 FriBidiLevel *levels, gp_run_t **runs_out, uint32_t *len)
 {
@@ -133,7 +141,7 @@ void gp_itemize(gp_runes_t runes, FcFontSet *fs, FcFontSet *fs_color,
 		changed |= iter.level != level;
 
 		// Terminate current run on attribute changes or end of text.
-		if (changed || iter.at == runes.len - 1) {
+		if (changed) {
 			runs[r].start = iter.start;
 			runs[r].end = iter.at;
 			runs[r].script = iter.script;
@@ -143,6 +151,7 @@ void gp_itemize(gp_runes_t runes, FcFontSet *fs, FcFontSet *fs_color,
 				printf("run had no font???\n");
 			}
 			runs[r].font = iter.font;
+			runs[r].font_pri = iter.font_pri;
 
 			iter.start = iter.at;
 			iter.width = width;
@@ -157,9 +166,19 @@ void gp_itemize(gp_runes_t runes, FcFontSet *fs, FcFontSet *fs_color,
 			assert(r < 256);
 		}
 	}
+	runs[r].start = iter.start;
+	runs[r].end = iter.at;
+	runs[r].script = iter.script;
+	runs[r].width = iter.width;
+	runs[r].level = iter.level;
+	if (iter.font == NULL) {
+		printf("run had no font???\n");
+	}
+	runs[r].font = iter.font;
+	runs[r].font_pri = iter.font_pri;
 
 	*runs_out = runs;
-	*len = r;
+	*len = r + 1;
 }
 
 void shape_runs(gp_runes_t vrunes, gp_run_t *runs, uint32_t len)
@@ -227,7 +246,7 @@ void shape_runs(gp_runes_t vrunes, gp_run_t *runs, uint32_t len)
 }
 
 bool gp_analyze(gp_runes_t runes, FcFontSet *fs, FcFontSet *fs_color,
-                char *lang, gp_run_t **runs_out, uint32_t *len)
+                const char *lang, gp_run_t **runs_out, uint32_t *len)
 {
 	UNUSED(lang);
 	assert(runes.len < 4096); // I dont want to malloc.
@@ -291,8 +310,8 @@ FcFontSet *gp_load_font(FcConfig *config, char *pattern, bool with_color)
 	return fs;
 }
 
-void gp_utf8_to_runes(char *utf8, uint32_t len, uint32_t dst_cap, uint32_t *dst,
-                      uint32_t *dst_len)
+void gp_utf8_to_runes(const char *utf8, uint32_t len, uint32_t dst_cap,
+                      uint32_t *dst, uint32_t *dst_len)
 {
 	UNUSED(dst_cap);
 	int char_set_num = fribidi_parse_charset("UTF-8");

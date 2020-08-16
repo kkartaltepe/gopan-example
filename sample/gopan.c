@@ -92,6 +92,7 @@ int main(int argc, char *argv[])
 	cairo_surface_destroy(bitmap);
 	printf("drew runs to out.png\n");
 
+	gp_run_destroy(runs, r_len);
 	FcFontSetDestroy(fs);
 	return 0;
 }
