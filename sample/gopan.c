@@ -1,3 +1,6 @@
+// We need DT_REG from dirent
+#define _DEFAULT_SOURCE
+
 #include <cairo/cairo.h>
 #include <gp.h>
 #include <hb-ot.h>

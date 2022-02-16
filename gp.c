@@ -346,6 +346,44 @@ void to_aligned_font_space(cairo_t *cr)
 	cairo_translate(cr, x, y);
 }
 
+void try_draw_glyph(cairo_t *cr, hb_font_t *font, double x, double y,
+                    hb_codepoint_t glyph, hb_glyph_position_t gp)
+{
+	cairo_save(cr);
+	// flip y of font drawing to match 0,0 top,left of cairo.
+	cairo_scale(cr, 1.0 / GP_SHAPE_SCALE, -1.0 / GP_SHAPE_SCALE);
+	cairo_translate(cr, x + gp.x_offset, y + gp.y_offset);
+
+	// printf("glyph(%d) at: (%f,%f)\n", glyph_info[g].codepoint, x,
+	//    y);
+	// printf("glyph off: (%d,%d) glyph adv: (%d,%d)\n",
+	// glyph_pos[g].x_offset, glyph_pos[g].y_offset,
+	// glyph_pos[g].x_advance, glyph_pos[g].y_advance);
+
+	// Patched harfbuzz for EBDT support.
+#ifdef HB_HAS_BITMAP_SUPPORT
+	uint8_t bitmap_buf[1024] = {0}; // hold expanded sbits for cairo.
+	// in bits.
+	uint32_t width = 0, height = 0, depth = 0, data_len = 0;
+	hb_blob_t *bitmap = hb_ot_color_glyph_reference_bitmap(font, glyph, &depth,
+	                                                       &width, &height);
+	const uint8_t *data = (const uint8_t *)hb_blob_get_data(bitmap, &data_len);
+
+	uint32_t stride = cairo_format_stride_for_width(CAIRO_FORMAT_A1, width);
+	memset(bitmap_buf, 0, height * stride);
+	sbit_to_bitmap(data, bitmap_buf, width, height, stride * 8);
+
+	cairo_surface_t *glyph_mask = cairo_image_surface_create_for_data(
+	        bitmap_buf, CAIRO_FORMAT_A1, width, height, stride);
+	to_aligned_pixel_space(cr);
+	cairo_mask_surface(cr, glyph_mask, 0, 0.0 - height);
+	cairo_surface_destroy(glyph_mask);
+	hb_blob_destroy(bitmap);
+#endif
+
+	cairo_restore(cr);
+}
+
 void gp_draw_cairo(cairo_t *cr, gp_run_t *runs, uint32_t len)
 {
 	uint32_t i = 0;
@@ -369,50 +407,30 @@ void gp_draw_cairo(cairo_t *cr, gp_run_t *runs, uint32_t len)
 		hb_blob_t *ebdt = hb_face_reference_table(runs[i].font->hb_face,
 		                                          HB_TAG('E', 'B', 'D', 'T'));
 		if (hb_blob_get_length(ebdt) > 0) {
+			// if (false) {
 			cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
 			for (uint32_t g = 0; g < glen; g++) {
-				cairo_save(cr);
-				// flip y of font drawing to match 0,0 top,left of cairo.
-				cairo_scale(cr, 1.0 / GP_SHAPE_SCALE, -1.0 / GP_SHAPE_SCALE);
-				cairo_translate(cr, x + glyph_pos[g].x_offset,
-				                y + glyph_pos[g].y_offset);
-
-				// printf("glyph(%d) at: (%f,%f)\n", glyph_info[g].codepoint, x,
-				//    y);
-				// printf("glyph off: (%d,%d) glyph adv: (%d,%d)\n",
-				// glyph_pos[g].x_offset, glyph_pos[g].y_offset,
-				// glyph_pos[g].x_advance, glyph_pos[g].y_advance);
-
-				// Patched harfbuzz for EBDT support.
-#ifdef HB_HAS_BITMAP_SUPPORT
-				uint8_t bitmap_buf[1024] = {
-				        0}; // hold expanded sbits for cairo.
-				// in bits.
-				uint32_t width = 0, height = 0, depth = 0, data_len = 0;
-				hb_blob_t *bitmap = hb_ot_color_glyph_reference_bitmap(
-				        font, glyph_info[g].codepoint, &depth, &width, &height);
-				const uint8_t *data =
-				        (const uint8_t *)hb_blob_get_data(bitmap, &data_len);
-
-				uint32_t stride =
-				        cairo_format_stride_for_width(CAIRO_FORMAT_A1, width);
-				memset(bitmap_buf, 0, height * stride);
-				sbit_to_bitmap(data, bitmap_buf, width, height, stride * 8);
-
-				cairo_surface_t *glyph_mask =
-				        cairo_image_surface_create_for_data(bitmap_buf,
-				                                            CAIRO_FORMAT_A1,
-				                                            width, height,
-				                                            stride);
-				to_aligned_pixel_space(cr);
-				cairo_mask_surface(cr, glyph_mask, 0, 0.0 - height);
-				cairo_surface_destroy(glyph_mask);
-				hb_blob_destroy(bitmap);
-#endif
-
+				uint32_t size = 64;
+				hb_codepoint_t decomposed[64] = {0};
+				hb_position_t offsets[128] = {0};
+				if ((size = hb_ot_color_glyph_decompose_bitmap(
+				             font, glyph_info[g].codepoint, size, decomposed,
+				             offsets)) != 0) {
+					printf("Decomposed %d into %d components\n",
+					       glyph_info[g].codepoint, size);
+					for (uint32_t i = 0; i < size; i++) {
+						printf("%d ", decomposed[i]);
+						try_draw_glyph(cr, font, x + offsets[i * 2],
+						               y + offsets[i * 2 + 1], decomposed[i],
+						               glyph_pos[g]);
+					}
+				} else {
+					printf("Bitmap didnt decompose\n");
+					try_draw_glyph(cr, font, x, y, glyph_info[g].codepoint,
+					               glyph_pos[g]);
+				}
 				x += glyph_pos[g].x_advance;
 				y += glyph_pos[g].y_advance;
-				cairo_restore(cr);
 			}
 		} else {
 			cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
