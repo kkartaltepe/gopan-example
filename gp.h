@@ -27,16 +27,13 @@ typedef struct gp_run {
 	enum gp_script script;
 	enum gp_width width;
 	struct gp_face_t *font;
+	uint32_t ppem; // track ppem in run as this is baked into glyphs but not for bitmaps
 	hb_buffer_t *glyphs;
 } gp_run_t;
-
 
 // Helper to convert utf8 to codepoints
 void gp_utf8_to_runes(const char *utf8, uint32_t len, uint32_t dst_cap,
                       uint32_t *dst, uint32_t *dst_len);
-
-// Helper to draw onto a cairo surface if you dont want to implement rendering yourself.
-void gp_draw_cairo(cairo_t *cr, gp_run_t *runs, uint32_t len);
 
 // analyze returns a set of runs composing all the information to properly
 // render the provided text.  runs_out will contain the chosen font for
@@ -51,4 +48,7 @@ bool gp_analyze(gp_runes_t runes, struct gp_face_set_t faces,
 
 // Free data from gp_run_t
 void gp_run_destroy(gp_run_t *runs, uint32_t len);
+
+// Helper to draw onto a cairo surface if you dont want to implement rendering yourself.
+void gp_draw_cairo(cairo_t *cr, gp_run_t *runs, uint32_t len);
 #endif

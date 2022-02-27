@@ -4,6 +4,7 @@ project('gopan', 'c',
 
 srcs= files([
   'gp.c',
+  'gp_draw.c',
   'gp_ttf.c',
   'gp_props.c',
   ])
@@ -27,7 +28,7 @@ gp_lib = library('gp', srcs + pub_hdrs,
 
 pkg = import('pkgconfig')
 pkg.generate(libraries : gp_lib,
-  requires: [harfbuzz, cairo], # exposed via header
+  requires: [harfbuzz, cairo],
   subdirs : 'gp',
   name : 'libgp',
   description : 'Simple userland font rendering')
